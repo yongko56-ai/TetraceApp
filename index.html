@@ -57,7 +57,6 @@
         .sidebar-text { transition: opacity 0.2s, width 0.2s; white-space: nowrap; overflow: hidden; }
         .tooltip-group:hover .tooltip-text { display: block; }
         
-        /* Estilos específicos para el calendario */
         .calendar-day { height: 6rem; position: relative; } 
         .calendar-day:hover { background-color: #f1f5f9; }
         .calendar-day.selected { background-color: #0ea5e9; border-color: #0ea5e9; color: white; }
@@ -93,7 +92,7 @@
             <ul class="space-y-1 px-3" id="nav-links"></ul>
         </nav>
 
-        <div class="p-4 border-t border-slate-800 text-xs text-slate-500 text-center sidebar-text whitespace-nowrap">v1.20.0 • Ingenium</div>
+        <div class="p-4 border-t border-slate-800 text-xs text-slate-500 text-center sidebar-text whitespace-nowrap">v1.24.0 • Ingenium</div>
     </aside>
 
     <!-- MAIN AREA -->
@@ -101,9 +100,14 @@
         <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shadow-sm z-10">
             <h2 id="page-title" class="text-xl font-bold text-slate-800 flex items-center gap-2">Dashboard</h2>
             <div class="flex items-center gap-4">
-                <div id="connection-status" class="hidden px-2 py-1 bg-orange-100 text-orange-600 text-xs rounded-full font-bold flex items-center gap-1">
-                    <i data-lucide="wifi-off" class="w-3 h-3"></i> Offline
+                <!-- CLOUD SYNC MONITOR (NEW) -->
+                <div id="sync-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium transition-all">
+                    <i data-lucide="cloud-off" class="w-4 h-4"></i>
+                    <span>Desconectado</span>
                 </div>
+
+                <div class="h-8 w-px bg-slate-200 mx-2"></div>
+
                 <button class="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors relative">
                     <i data-lucide="bell" class="w-5 h-5"></i>
                     <span class="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full border border-white"></span>
@@ -119,7 +123,7 @@
         <div id="app-view" class="flex-1 overflow-y-auto p-8 custom-scrollbar relative">
             <div id="initial-loader" class="flex flex-col items-center justify-center h-full gap-4">
                 <div class="animate-spin rounded-full h-12 w-12 border-4 border-slate-200 border-t-tetrace-600"></div>
-                <p class="text-slate-400 text-sm animate-pulse">Iniciando Sistema TETRACE...</p>
+                <p class="text-slate-400 text-sm animate-pulse">Conectando a TETRACE Cloud...</p>
             </div>
         </div>
     </main>
@@ -147,8 +151,9 @@
             measurementId: "G-RN73SL3FJD"
         };
 
-        const APP_ID = "tetrace-prod-v1";
-        window.__app_id = APP_ID;
+        // FIXED: USE ENVIRONMENT APP_ID FOR CORRECT CLOUD SHARDING
+        const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'tetrace-dev-fallback';
+        console.log("🚀 Initializing TETRACE ERP on Instance:", APP_ID);
 
         let app, db, auth;
         try {
@@ -161,20 +166,36 @@
 
         /* ================= STORE ================= */
         const Store = {
-            user: null, isOffline: false, projects: [], personnel: [], logs: [], attendance: [],
+            user: null, isOffline: false, projects: [], personnel: [], logs: [], attendance: [], materials: [],
             ui: { currentView: 'dashboard', selectedProjectId: null, selectedPersonId: null, isLoading: true, isSidebarCollapsed: false, attendanceMonth: new Date() },
             listeners: [],
             subscribe(callback) { this.listeners.push(callback); },
             notify() { this.listeners.forEach(cb => cb(this)); },
+            
             setProjects(data) { this.projects = data; this.notify(); },
             setPersonnel(data) { this.personnel = data; this.notify(); },
             setLogs(data) { this.logs = data; this.notify(); },
             setAttendance(data) { this.attendance = data; this.notify(); },
-            setOfflineMode(status) {
-                this.isOffline = status;
-                const badge = document.getElementById('connection-status');
-                if(badge) status ? badge.classList.remove('hidden') : badge.classList.add('hidden');
+            setMaterials(data) { this.materials = data; this.notify(); },
+            
+            // NUEVO: Gestión de Estado de Sincronización
+            setSyncStatus(status) { // 'synced', 'syncing', 'error'
+                const el = document.getElementById('sync-status');
+                if(!el) return;
+                
+                if (status === 'synced') {
+                    el.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-50 text-green-700 text-xs font-medium border border-green-200 shadow-sm";
+                    el.innerHTML = `<i data-lucide="cloud" class="w-4 h-4"></i><span>En Línea</span>`;
+                } else if (status === 'syncing') {
+                    el.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 text-xs font-medium border border-amber-200";
+                    el.innerHTML = `<i data-lucide="refresh-cw" class="w-4 h-4 animate-spin"></i><span>Guardando...</span>`;
+                } else {
+                    el.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-50 text-red-700 text-xs font-medium border border-red-200";
+                    el.innerHTML = `<i data-lucide="wifi-off" class="w-4 h-4"></i><span>Offline</span>`;
+                }
+                lucide.createIcons();
             },
+
             setView(viewName, params = {}) { 
                 this.ui.currentView = viewName;
                 this.ui.selectedProjectId = params.projectId || null;
@@ -195,45 +216,72 @@
         const DBService = {
             init: async () => {
                 const watchdog = setTimeout(() => {
-                    if (Store.ui.isLoading) { Store.setLoading(false); Store.setOfflineMode(true); UIService.toast("Modo Offline activado", "info"); }
-                }, 4000); 
+                    if (Store.ui.isLoading) { 
+                        Store.setLoading(false); 
+                        Store.setSyncStatus('error');
+                        UIService.toast("Conexión lenta: Modo Offline activado", "warning"); 
+                    }
+                }, 5000); 
+
                 try {
                     if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
                     else await signInAnonymously(auth);
+                    
                     onAuthStateChanged(auth, (user) => {
                         clearTimeout(watchdog);
-                        if (user) { Store.user = user; Store.setOfflineMode(false); DBService.startListeners(user.uid); }
-                        else { Store.setLoading(false); Store.setOfflineMode(true); }
+                        if (user) { 
+                            Store.user = user; 
+                            Store.setSyncStatus('synced');
+                            DBService.startListeners(user.uid); 
+                        } else { 
+                            Store.setLoading(false); 
+                            Store.setSyncStatus('error');
+                        }
                     });
-                } catch (error) { clearTimeout(watchdog); Store.setLoading(false); Store.setOfflineMode(true); UIService.toast("Sin conexión al servidor", "error"); }
+                } catch (error) { 
+                    clearTimeout(watchdog); 
+                    Store.setLoading(false); 
+                    Store.setSyncStatus('error');
+                    console.error("Auth Error:", error);
+                }
             },
+
             startListeners: (userId) => {
+                // FIXED: Use variable APP_ID
                 const projectsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'projects');
                 const personnelRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'personnel');
                 const logsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'logs');
                 const attendanceRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'attendance'); 
+                const materialsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'materials'); 
 
                 const handleSnapshot = (snapshot, setter, cacheKey) => {
                     const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                     setter(data);
                     if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(data));
-                    Store.setLoading(false); 
+                    Store.setLoading(false);
+                    Store.setSyncStatus('synced');
                     
                     if (cacheKey === 'tetrace_projects' && data.length === 0 && !localStorage.getItem('tetrace_seeded')) {
                         DBService.seedMockData();
                     }
                 };
-                onSnapshot(projectsRef, (s) => handleSnapshot(s, (d) => Store.setProjects(d), 'tetrace_projects'), () => Store.setOfflineMode(true));
-                onSnapshot(personnelRef, (s) => handleSnapshot(s, (d) => Store.setPersonnel(d), 'tetrace_personnel'), () => Store.setOfflineMode(true));
-                onSnapshot(logsRef, (s) => handleSnapshot(s, (d) => Store.setLogs(d), null), () => {});
-                onSnapshot(attendanceRef, (s) => handleSnapshot(s, (d) => Store.setAttendance(d), 'tetrace_attendance'), () => {}); 
+
+                const handleError = (e) => {
+                    console.error("Listener Error:", e);
+                    Store.setSyncStatus('error');
+                };
+
+                onSnapshot(projectsRef, (s) => handleSnapshot(s, (d) => Store.setProjects(d), 'tetrace_projects'), handleError);
+                onSnapshot(personnelRef, (s) => handleSnapshot(s, (d) => Store.setPersonnel(d), 'tetrace_personnel'), handleError);
+                onSnapshot(logsRef, (s) => handleSnapshot(s, (d) => Store.setLogs(d), null), handleError);
+                onSnapshot(attendanceRef, (s) => handleSnapshot(s, (d) => Store.setAttendance(d), 'tetrace_attendance'), handleError); 
+                onSnapshot(materialsRef, (s) => handleSnapshot(s, (d) => Store.setMaterials(d), 'tetrace_materials'), handleError); 
             },
             
             seedMockData: async () => {
-                const project = {
-                    name: "Parque Eólico Wayra Extensión", code: "PE-WEX-001", client: "Enel Green Power", pmName: "Steven Ko",
-                    country: "Perú", location: "Ica, Nazca", currency: "USD", budget: 2500000, description: "Ampliación de 30 aerogeneradores en la zona sur.", startDate: new Date().toISOString().split('T')[0], status: "En Progreso", progress: 35, createdAt: new Date().toISOString(), isArchived: false
-                };
+                localStorage.setItem('tetrace_seeded', 'true');
+                
+                // Solo Personal Mock
                 const pm = {
                     firstName: "Steven", lastName: "Ko", name: "Steven Ko", role: "Project Manager", position: "Project Manager", email: "steven.ko@tetrace.com", phone: "+51 999 888 777", nationality: "Peruana", office: "Perú", currentProjectId: null, id: "pm_mock_01"
                 };
@@ -244,84 +292,133 @@
                     firstName: "Miguel", lastName: "Ruiz", name: "Miguel Ruiz", role: "Técnico", position: "HSE", email: "miguel.ruiz@tetrace.com", phone: "+51 912 345 678", docType: "DNI", docNumber: "78901234", nationality: "Peruana", eppBoots: "42", eppShirt: "L", eppPants: "34", currentProjectId: null, id: "tech_mock_02"
                 };
 
-                const projects = [project];
                 const personnel = [pm, tech1, tech2];
-                
-                Store.setProjects(projects);
                 Store.setPersonnel(personnel);
-                localStorage.setItem('tetrace_projects', JSON.stringify(projects));
                 localStorage.setItem('tetrace_personnel', JSON.stringify(personnel));
-                localStorage.setItem('tetrace_seeded', 'true');
                 
-                UIService.toast("Datos de prueba generados", "success");
+                await DBService.addPerson(pm);
+                await DBService.addPerson(tech1);
+                await DBService.addPerson(tech2);
+                
+                UIService.toast("Datos de personal base generados", "success");
             },
+
+            // --- GENERIC CRUD WITH SYNC STATUS ---
+            genericAdd: async (collName, data, setter, cacheKey) => {
+                const tempId = 'temp_' + Date.now();
+                const optimisticData = { ...data, id: tempId, createdAt: new Date().toISOString() };
+                
+                const currentList = collName === 'projects' ? Store.projects : 
+                                  (collName === 'personnel' ? Store.personnel : Store.materials);
+                
+                const updatedList = [...currentList, optimisticData];
+                
+                // 1. Update UI
+                setter(updatedList); 
+                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
+                
+                // 2. Set Sync Status
+                Store.setSyncStatus('syncing');
+                UIService.toast("Guardando...", "info");
+
+                // 3. Network Write
+                if (auth.currentUser) {
+                    try {
+                        await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', collName), { ...data, createdAt: serverTimestamp() });
+                        Store.setSyncStatus('synced');
+                        UIService.toast("Sincronizado", "success");
+                    } catch (e) {
+                        console.error("Write Error:", e);
+                        Store.setSyncStatus('error');
+                        UIService.toast("Error de nube. Guardado local.", "error");
+                    }
+                } else {
+                    Store.setSyncStatus('error');
+                    UIService.toast("Modo Offline: Datos locales", "warning");
+                }
+            },
+
+            genericUpdate: async (collName, id, data, currentList, setter, cacheKey) => {
+                const updatedList = currentList.map(item => item.id === id ? { ...item, ...data } : item);
+                setter(updatedList);
+                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
+                
+                Store.setSyncStatus('syncing');
+                if (!auth.currentUser) {
+                     Store.setSyncStatus('error');
+                     return;
+                }
+                
+                try {
+                    await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', collName, id), data);
+                    Store.setSyncStatus('synced');
+                    UIService.toast("Cambios guardados", "success");
+                } catch (e) {
+                    console.error("Update Error:", e);
+                    Store.setSyncStatus('error');
+                }
+            },
+
+            genericDelete: async (collName, id, currentList, setter, cacheKey) => {
+                const updatedList = currentList.filter(item => item.id !== id);
+                setter(updatedList);
+                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
+                
+                Store.setSyncStatus('syncing');
+                if (!auth.currentUser) {
+                    Store.setSyncStatus('error');
+                    return;
+                }
+
+                try {
+                    await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', collName, id));
+                    Store.setSyncStatus('synced');
+                } catch (e) {
+                    console.error("Delete Error:", e);
+                    Store.setSyncStatus('error');
+                }
+            },
+
+            // --- SPECIFIC METHODS WRAPPING GENERIC ---
+            addProject: async (data) => DBService.genericAdd('projects', data, (d) => Store.setProjects(d), 'tetrace_projects'),
+            updateProject: async (id, data) => DBService.genericUpdate('projects', id, data, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
+            deleteProject: async (id) => DBService.genericDelete('projects', id, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
+            
+            addPerson: async (data) => DBService.genericAdd('personnel', data, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
+            updatePerson: async (id, data) => DBService.genericUpdate('personnel', id, data, Store.personnel, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
+            deletePerson: async (id) => DBService.genericDelete('personnel', id, Store.personnel, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
+            
+            addMaterial: async (data) => DBService.genericAdd('materials', data, (d) => Store.setMaterials(d), 'tetrace_materials'),
+            updateMaterial: async (id, data) => DBService.genericUpdate('materials', id, data, Store.materials, (d) => Store.setMaterials(d), 'tetrace_materials'),
+            deleteMaterial: async (id) => DBService.genericDelete('materials', id, Store.materials, (d) => Store.setMaterials(d), 'tetrace_materials'),
 
             saveAttendance: async (projectId, date, records) => {
                 const docId = `${projectId}_${date}`;
                 const attendanceData = { id: docId, projectId, date, records };
+                
+                // Optimistic
                 const existingIndex = Store.attendance.findIndex(a => a.id === docId);
                 let updatedAttendance = [...Store.attendance];
                 if (existingIndex >= 0) updatedAttendance[existingIndex] = attendanceData;
                 else updatedAttendance.push(attendanceData);
                 Store.setAttendance(updatedAttendance);
                 localStorage.setItem('tetrace_attendance', JSON.stringify(updatedAttendance));
-                UIService.toast("Asistencia guardada", "info");
-                if (Store.isOffline || !auth.currentUser) return;
-                try { await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'attendance', docId), attendanceData); UIService.toast("Sincronizado correctamente", "success"); } 
-                catch (e) { console.error(e); UIService.toast("Error al sincronizar", "error"); }
-            },
-
-            addProject: async (data) => DBService.genericAdd('projects', data, (d) => Store.setProjects(d), 'tetrace_projects'),
-            updateProject: async (id, data) => DBService.genericUpdate('projects', id, data, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
-            addPerson: async (data) => DBService.genericAdd('personnel', data, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
-            updatePerson: async (id, data) => DBService.genericUpdate('personnel', id, data, Store.personnel, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
-            deleteProject: async (id) => DBService.genericDelete('projects', id, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
-            deletePerson: async (id) => DBService.genericDelete('personnel', id, Store.personnel, (d) => Store.setPersonnel(d), 'tetrace_personnel'),
-            releaseResourcesAndArchive: async (projectId) => {
-                const project = Store.projects.find(p => p.id === projectId);
-                if (!project) return;
-                const today = new Date().toISOString().split('T')[0];
-                const updatedProjects = Store.projects.map(p => p.id === projectId ? { ...p, isArchived: true, status: 'Cerrado' } : p);
-                const affectedPersonnelIds = [];
-                const updatedPersonnel = Store.personnel.map(p => {
-                    if (p.currentProjectId === projectId) {
-                        affectedPersonnelIds.push(p.id);
-                        const historyEntry = { projectId: project.id, projectName: project.name, projectCode: project.code || 'S/C', role: p.position || p.role, startDate: project.startDate, endDate: today, status: 'Finalizado' };
-                        return { ...p, currentProjectId: null, history: [...(p.history || []), historyEntry] };
-                    }
-                    return p;
-                });
-                Store.setProjects(updatedProjects); Store.setPersonnel(updatedPersonnel);
-                localStorage.setItem('tetrace_projects', JSON.stringify(updatedProjects)); localStorage.setItem('tetrace_personnel', JSON.stringify(updatedPersonnel));
-                UIService.toast("Proyecto cerrado y recursos liberados", "success");
-                if (auth.currentUser && !Store.isOffline) {
-                    try {
-                        const batchPromises = [updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'projects', projectId), { isArchived: true, status: 'Cerrado' })];
-                        updatedPersonnel.filter(p => affectedPersonnelIds.includes(p.id)).forEach(p => { batchPromises.push(updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'personnel', p.id), { currentProjectId: null, history: p.history })); });
-                        await Promise.all(batchPromises);
-                    } catch (e) { console.error("Sync error:", e); }
+                
+                Store.setSyncStatus('syncing');
+                if (!auth.currentUser) return Store.setSyncStatus('error');
+                
+                try {
+                    await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'attendance', docId), attendanceData);
+                    Store.setSyncStatus('synced');
+                    UIService.toast("Asistencia sincronizada", "success");
+                } catch (e) {
+                    console.error(e);
+                    Store.setSyncStatus('error');
                 }
             },
-            genericAdd: async (collName, data, setter, cacheKey) => {
-                const tempId = 'temp_' + Date.now(); const optimisticData = { ...data, id: tempId, createdAt: new Date().toISOString() };
-                const currentList = collName === 'projects' ? Store.projects : Store.personnel; setter([...currentList, optimisticData]); 
-                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify([...currentList, optimisticData]));
-                UIService.toast("Guardando...", "info");
-                if (auth.currentUser && !Store.isOffline) { try { await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', collName), { ...data, createdAt: serverTimestamp() }); UIService.toast("Sincronizado con la nube", "success"); } catch (e) { UIService.toast("Guardado localmente (Offline)", "warning"); } } else { UIService.toast("Guardado localmente (Offline)", "info"); }
-            },
-            genericUpdate: async (collName, id, data, currentList, setter, cacheKey) => {
-                const updatedList = currentList.map(item => item.id === id ? { ...item, ...data } : item); setter(updatedList);
-                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
-                if (Store.isOffline || !auth.currentUser) return;
-                try { await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', collName, id), data); UIService.toast("Cambios guardados", "success"); } catch (e) { console.error(e); }
-            },
-            genericDelete: async (collName, id, currentList, setter, cacheKey) => {
-                const updatedList = currentList.filter(item => item.id !== id); setter(updatedList);
-                if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
-                if (Store.isOffline || !auth.currentUser) { UIService.toast("Eliminado localmente", "info"); return; }
-                try { await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', collName, id)); } catch (e) { console.error("Delete error:", e); UIService.toast("Error al eliminar en la nube", "error"); }
-            },
-            deleteDoc: async (docRef) => { try { await deleteDoc(docRef); } catch(e) { console.error(e); } }
+            
+            releaseResourcesAndArchive: async (projectId) => { /* ... (Igual v1.23.1) ... */ const project = Store.projects.find(p => p.id === projectId); if (!project) return; const today = new Date().toISOString().split('T')[0]; const updatedProjects = Store.projects.map(p => p.id === projectId ? { ...p, isArchived: true, status: 'Cerrado' } : p); const affectedPersonnelIds = []; const updatedPersonnel = Store.personnel.map(p => { if (p.currentProjectId === projectId) { affectedPersonnelIds.push(p.id); const historyEntry = { projectId: project.id, projectName: project.name, projectCode: project.code || 'S/C', role: p.position || p.role, startDate: project.startDate, endDate: today, status: 'Finalizado' }; return { ...p, currentProjectId: null, history: [...(p.history || []), historyEntry] }; } return p; }); Store.setProjects(updatedProjects); Store.setPersonnel(updatedPersonnel); localStorage.setItem('tetrace_projects', JSON.stringify(updatedProjects)); localStorage.setItem('tetrace_personnel', JSON.stringify(updatedPersonnel)); UIService.toast("Proyecto cerrado y recursos liberados", "success"); if (auth.currentUser) { try { const batchPromises = [updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'projects', projectId), { isArchived: true, status: 'Cerrado' })]; updatedPersonnel.filter(p => affectedPersonnelIds.includes(p.id)).forEach(p => { batchPromises.push(updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'personnel', p.id), { currentProjectId: null, history: p.history })); }); await Promise.all(batchPromises); } catch (e) { console.error("Sync error:", e); } } },
+            deleteDoc: async (docRef) => { try { await deleteDoc(docRef); } catch(e) { console.error(e); throw e; } }
         };
 
         /* ================= LOGICA DE NEGOCIO ================= */
@@ -329,96 +426,20 @@
             getDashboardStats: () => {
                 const activeProjects = Store.projects.filter(p => !p.isArchived && p.status !== 'Cerrado');
                 const totalBudget = activeProjects.reduce((sum, p) => sum + (parseFloat(p.budget) || 0), 0);
-                return { activeCount: activeProjects.length, totalBudget: totalBudget, pendingMRs: activeProjects.length * 2 + 5 };
+                const pendingMRs = Store.materials.filter(m => m.status !== 'Entregado').length;
+                return { activeCount: activeProjects.length, totalBudget: totalBudget, pendingMRs: pendingMRs };
             },
             getAssignedTechs: (projectId) => Store.personnel.filter(p => p.currentProjectId === projectId),
             getAvailableTechs: () => Store.personnel.filter(p => p.role === 'Técnico' && !p.currentProjectId),
-            // NUEVO: Obtener historial completo incluyendo registros de asistencia
-            getTechnicianHistory: (personId) => {
-                const person = Store.personnel.find(p => p.id === personId);
-                if (!person) return [];
-
-                const historyMap = new Map();
-
-                // 1. Agregar registros de historial guardados en el perfil
-                if (person.history) {
-                    person.history.forEach(h => {
-                        historyMap.set(h.projectId, {
-                            id: h.projectId,
-                            name: h.projectName,
-                            code: h.projectCode,
-                            status: h.status || 'Finalizado' // Asumimos finalizado si viene del historial
-                        });
-                    });
-                }
-
-                // 2. Escanear asistencias para encontrar proyectos no registrados en 'history'
-                Store.attendance.forEach(sheet => {
-                    const record = sheet.records.find(r => r.techId === personId);
-                    if (record && !historyMap.has(sheet.projectId)) {
-                        // Buscar info del proyecto en el store (incluso si está archivado)
-                        const project = Store.projects.find(p => p.id === sheet.projectId);
-                        if (project) {
-                            historyMap.set(project.id, {
-                                id: project.id,
-                                name: project.name,
-                                code: project.code,
-                                status: project.status
-                            });
-                        }
-                    }
-                });
-                
-                // 3. Agregar proyecto actual
-                if (person.currentProjectId) {
-                     const currentProj = Store.projects.find(p => p.id === person.currentProjectId);
-                     if(currentProj) {
-                         historyMap.set(currentProj.id, {
-                             id: currentProj.id,
-                             name: currentProj.name,
-                             code: currentProj.code,
-                             status: 'Activo' // Marcador especial
-                         });
-                     }
-                }
-
-                return Array.from(historyMap.values());
-            },
-            getStatusColor: (status) => {
-                const map = { 'Planificación': 'bg-slate-100 text-slate-700 border-slate-300', 'En Progreso': 'bg-blue-100 text-blue-700 border-blue-300', 'Detenido': 'bg-red-100 text-red-700 border-red-300', 'Completo': 'bg-emerald-100 text-emerald-700 border-emerald-300', 'Cerrado': 'bg-slate-800 text-slate-200 border-slate-600' };
-                return map[status] || 'bg-gray-100 text-gray-700';
-            },
-            formatCurrency: (amount, currency = 'PEN') => {
-                const locales = { 'PEN': 'es-PE', 'USD': 'en-US', 'EUR': 'es-ES', 'CLP': 'es-CL', 'BRL': 'pt-BR' };
-                return new Intl.NumberFormat(locales[currency] || 'es-PE', { style: 'currency', currency: currency }).format(amount);
-            },
-            // NUEVO: Formato Compacto Estricto (K, M, B)
-            formatCompactCurrency: (amount) => {
-                if (amount >= 1.0e+9) return "€ " + (amount / 1.0e+9).toFixed(1) + "B";
-                if (amount >= 1.0e+6) return "€ " + (amount / 1.0e+6).toFixed(1) + "M";
-                if (amount >= 1.0e+3) return "€ " + (amount / 1.0e+3).toFixed(1) + "K";
-                return "€ " + amount;
-            },
-            getInitials: (name) => {
-                if (!name) return '??'; const parts = name.trim().split(' ');
-                if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
-                return (parts[0][0] + parts[1][0]).toUpperCase();
-            },
-            getDocumentStatus: (expiryDate) => {
-                if (!expiryDate) return { label: 'Sin Fecha', color: 'bg-slate-100 text-slate-500' };
-                const today = new Date(); today.setHours(0,0,0,0);
-                const diffDays = Math.ceil((new Date(expiryDate) - today) / (1000 * 60 * 60 * 24));
-                if (diffDays < 0) return { label: 'Vencido', color: 'bg-red-100 text-red-700 border-red-200' };
-                if (diffDays <= 15) return { label: 'Por Vencer', color: 'bg-orange-100 text-orange-700 border-orange-200' };
-                return { label: 'Vigente', color: 'bg-green-100 text-green-700 border-green-200' };
-            },
-            getCalendarDays: (year, month) => {
-                const firstDay = new Date(year, month, 1); const lastDay = new Date(year, month + 1, 0); const daysInMonth = lastDay.getDate(); const startingDay = firstDay.getDay();
-                const calendar = []; let day = 1;
-                for (let i = 0; i < 6; i++) { const week = []; for (let j = 0; j < 7; j++) { if ((i === 0 && j < startingDay) || day > daysInMonth) week.push(null); else { week.push(day); day++; } } calendar.push(week); if (day > daysInMonth) break; }
-                return calendar;
-            },
+            getTechnicianHistory: (personId) => { /* ... */ const person = Store.personnel.find(p => p.id === personId); if (!person) return []; const historyMap = new Map(); if (person.history) { person.history.forEach(h => { historyMap.set(h.projectId, { id: h.projectId, name: h.projectName, code: h.projectCode, status: h.status || 'Finalizado' }); }); } Store.attendance.forEach(sheet => { const record = sheet.records.find(r => r.techId === personId); if (record && !historyMap.has(sheet.projectId)) { const project = Store.projects.find(p => p.id === sheet.projectId); if (project) { historyMap.set(project.id, { id: project.id, name: project.name, code: project.code, status: project.status }); } } }); if (person.currentProjectId) { const currentProj = Store.projects.find(p => p.id === person.currentProjectId); if(currentProj) { historyMap.set(currentProj.id, { id: currentProj.id, name: currentProj.name, code: currentProj.code, status: 'Activo' }); } } return Array.from(historyMap.values()); },
+            getStatusColor: (status) => { const map = { 'Planificación': 'bg-slate-100 text-slate-700 border-slate-300', 'En Progreso': 'bg-blue-100 text-blue-700 border-blue-300', 'Detenido': 'bg-red-100 text-red-700 border-red-300', 'Completo': 'bg-emerald-100 text-emerald-700 border-emerald-300', 'Cerrado': 'bg-slate-800 text-slate-200 border-slate-600' }; return map[status] || 'bg-gray-100 text-gray-700'; },
+            formatCurrency: (amount, currency = 'PEN') => { const locales = { 'PEN': 'es-PE', 'USD': 'en-US', 'EUR': 'es-ES', 'CLP': 'es-CL', 'BRL': 'pt-BR' }; return new Intl.NumberFormat(locales[currency] || 'es-PE', { style: 'currency', currency: currency }).format(amount); },
+            formatCompactCurrency: (amount) => { if (amount >= 1.0e+9) return "€ " + (amount / 1.0e+9).toFixed(1) + "B"; if (amount >= 1.0e+6) return "€ " + (amount / 1.0e+6).toFixed(1) + "M"; if (amount >= 1.0e+3) return "€ " + (amount / 1.0e+3).toFixed(1) + "K"; return "€ " + amount; },
+            getInitials: (name) => { if (!name) return '??'; const parts = name.trim().split(' '); if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase(); return (parts[0][0] + parts[1][0]).toUpperCase(); },
+            getDocumentStatus: (expiryDate) => { if (!expiryDate) return { label: 'Sin Fecha', color: 'bg-slate-100 text-slate-500' }; const today = new Date(); today.setHours(0,0,0,0); const diffDays = Math.ceil((new Date(expiryDate) - today) / (1000 * 60 * 60 * 24)); if (diffDays < 0) return { label: 'Vencido', color: 'bg-red-100 text-red-700 border-red-200' }; if (diffDays <= 15) return { label: 'Por Vencer', color: 'bg-orange-100 text-orange-700 border-orange-200' }; return { label: 'Vigente', color: 'bg-green-100 text-green-700 border-green-200' }; },
+            getCalendarDays: (year, month) => { const firstDay = new Date(year, month, 1); const lastDay = new Date(year, month + 1, 0); const daysInMonth = lastDay.getDate(); const startingDay = firstDay.getDay(); const calendar = []; let day = 1; for (let i = 0; i < 6; i++) { const week = []; for (let j = 0; j < 7; j++) { if ((i === 0 && j < startingDay) || day > daysInMonth) week.push(null); else { week.push(day); day++; } } calendar.push(week); if (day > daysInMonth) break; } return calendar; },
             getAttendanceRecord: (projectId, date) => { return Store.attendance.find(a => a.id === `${projectId}_${date}`); },
+            groupMaterialsByDate: (materials) => { const groups = {}; materials.forEach(m => { const date = new Date(m.createdAt).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' }); if (!groups[date]) groups[date] = []; groups[date].push(m); }); return groups; },
             constants: {
                 pmPositions: ['Project Manager', 'Assistant PM', 'Junior PM', 'Senior PM'],
                 pmOffices: ['Perú', 'Chile', 'Argentina', 'Uruguay', 'Brasil', 'España', 'USA', 'Mexico', 'Canadá', 'Panamá', 'Colombia', 'Australia', 'India'],
@@ -427,7 +448,11 @@
                 techPositions: ['Técnico L1', 'Técnico L2', 'Técnico L3', 'HSE', 'Supervisor'],
                 docTypes: ['DNI', 'RUT', 'Carnet de Extranjería', 'Pasaporte', 'Licencia de Conducir'],
                 complianceDocTypes: ['EMO', 'SCTR', 'Formación', 'Curso', 'Inducción', 'Otro'],
-                attendanceStatuses: ['Presente', 'Falta', 'Tardanza', 'Descanso Médico', 'Vacaciones', 'Permiso', 'Bajada']
+                attendanceStatuses: ['Presente', 'Falta', 'Tardanza', 'Descanso Médico', 'Vacaciones', 'Permiso', 'Bajada'],
+                materialCategories: ['Materiales', 'EPPs', 'Herramientas', 'Calibración'],
+                materialUrgencies: ['Baja', 'Media', 'Alta'],
+                materialStatuses: ['Borrador', 'Solicitado', 'Comprando', 'Retirar', 'Entregado'],
+                materialUnits: ['und', 'kg', 'lt', 'm']
             }
         };
 
@@ -440,24 +465,20 @@
                 const collapsedPref = localStorage.getItem('tetrace_sidebar_collapsed');
                 if (collapsedPref === 'true') Store.ui.isSidebarCollapsed = true;
                 
-                // MOCK DATA CHECK IMMEDIATELY
-                if (!localStorage.getItem('tetrace_seeded')) {
-                    DBService.seedMockData(); // Force seed before load
-                }
-
-                ['tetrace_projects', 'tetrace_personnel', 'tetrace_attendance'].forEach(key => {
+                ['tetrace_projects', 'tetrace_personnel', 'tetrace_attendance', 'tetrace_materials'].forEach(key => {
                     const data = localStorage.getItem(key);
                     if (data) { try { const parsed = JSON.parse(data); 
                         if (key.includes('projects')) Store.projects = parsed; 
                         else if (key.includes('personnel')) Store.personnel = parsed;
                         else if (key.includes('attendance')) Store.attendance = parsed;
+                        else if (key.includes('materials')) Store.materials = parsed;
                     } catch(e){} }
                 });
                 if (Store.projects.length > 0 || Store.personnel.length > 0) Store.setLoading(false);
                 this.renderSidebar();
                 if (!Store.ui.isLoading) this.router();
             },
-            renderSidebar() {
+            renderSidebar() { /* ... Same ... */
                 const isCollapsed = Store.ui.isSidebarCollapsed;
                 const menuItems = [ { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard' }, { id: 'projects', icon: 'briefcase', label: 'Portafolio' }, { id: 'personnel', icon: 'users', label: 'Personal' }, { id: 'logbook', icon: 'book-open', label: 'Bitácora' } ];
                 this.sidebar.classList.toggle('w-20', isCollapsed); this.sidebar.classList.toggle('collapsed', isCollapsed); this.sidebar.classList.toggle('w-64', !isCollapsed);
@@ -474,7 +495,7 @@
                 `).join('');
                 lucide.createIcons();
             },
-            router() {
+            router() { /* ... Same ... */
                 if (Store.ui.isLoading && Store.projects.length === 0) return;
                 this.renderSidebar(); document.getElementById('initial-loader')?.remove(); this.container.innerHTML = ''; 
                 switch(Store.ui.currentView) {
@@ -488,45 +509,10 @@
                 }
                 setTimeout(() => lucide.createIcons(), 50);
             },
-            renderDashboard() { 
+            renderDashboard() { /* ... Same ... */
                 const stats = BusinessLogic.getDashboardStats();
-                // FILTRO: Solo mostrar proyectos no archivados y no cerrados en el resumen
                 const activeSummaryProjects = Store.projects.filter(p => !p.isArchived && p.status !== 'Cerrado').slice(0, 5);
-
-                this.container.innerHTML = `
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 fade-in">
-                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                            <div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">Proyectos Activos</h3><div class="p-2 bg-blue-50 text-blue-600 rounded-lg"><i data-lucide="activity" class="w-5 h-5"></i></div></div>
-                            <p class="text-3xl font-bold text-slate-800">${stats.activeCount}</p><div class="mt-2 text-xs text-green-600 font-medium flex items-center gap-1"><i data-lucide="trending-up" class="w-3 h-3"></i> En curso actualmente</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                            <div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">Presupuesto Ejecución</h3><div class="p-2 bg-emerald-50 text-emerald-600 rounded-lg"><i data-lucide="dollar-sign" class="w-5 h-5"></i></div></div>
-                            <p class="text-3xl font-bold text-slate-800">${BusinessLogic.formatCompactCurrency(stats.totalBudget)}</p><p class="mt-2 text-xs text-slate-400">Total global estimado (EUR)</p>
-                        </div>
-                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                            <div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">MRs Pendientes</h3><div class="p-2 bg-orange-50 text-orange-600 rounded-lg"><i data-lucide="package-open" class="w-5 h-5"></i></div></div>
-                            <p class="text-3xl font-bold text-slate-800">${stats.pendingMRs}</p>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden fade-in">
-                        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center"><h3 class="font-bold text-slate-800">Estado Reciente de Proyectos (Activos)</h3><button onclick="window.changeView('projects')" class="text-sm text-tetrace-600 hover:underline">Ver todo</button></div>
-                        <div class="overflow-x-auto">
-                            <table class="w-full text-sm text-left"><thead class="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200"><tr><th class="px-6 py-3">Proyecto</th><th class="px-6 py-3">PM Asignado</th><th class="px-6 py-3">Estado</th><th class="px-6 py-3 text-right">Avance</th></tr></thead>
-                                <tbody class="divide-y divide-slate-100">
-                                    ${activeSummaryProjects.map(p => `
-                                        <tr class="hover:bg-slate-50 transition-colors cursor-pointer" onclick="window.loadProject('${p.id}')">
-                                            <td class="px-6 py-4 font-medium text-slate-800">${p.name} <span class="text-xs text-slate-400 block">${p.code || 'S/C'}</span></td>
-                                            <td class="px-6 py-4 text-slate-600">${p.pmName || 'Sin asignar'}</td>
-                                            <td class="px-6 py-4"><span class="px-2 py-1 rounded-full text-xs font-semibold border ${BusinessLogic.getStatusColor(p.status)}">${p.status}</span></td>
-                                            <td class="px-6 py-4 text-right"><div class="flex items-center justify-end gap-2"><span class="text-xs font-bold">${p.progress}%</span><div class="w-20 h-2 bg-slate-200 rounded-full overflow-hidden"><div class="h-full bg-tetrace-500" style="width: ${p.progress}%"></div></div></div></td>
-                                        </tr>
-                                    `).join('')}
-                                    ${activeSummaryProjects.length === 0 ? '<tr><td colspan="4" class="px-6 py-4 text-center text-slate-400">No hay proyectos activos recientes.</td></tr>' : ''}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                `;
+                this.container.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 fade-in"><div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200"><div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">Proyectos Activos</h3><div class="p-2 bg-blue-50 text-blue-600 rounded-lg"><i data-lucide="activity" class="w-5 h-5"></i></div></div><p class="text-3xl font-bold text-slate-800">${stats.activeCount}</p><div class="mt-2 text-xs text-green-600 font-medium flex items-center gap-1"><i data-lucide="trending-up" class="w-3 h-3"></i> En curso actualmente</div></div><div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200"><div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">Presupuesto Ejecución</h3><div class="p-2 bg-emerald-50 text-emerald-600 rounded-lg"><i data-lucide="dollar-sign" class="w-5 h-5"></i></div></div><p class="text-3xl font-bold text-slate-800">${BusinessLogic.formatCompactCurrency(stats.totalBudget)}</p><p class="mt-2 text-xs text-slate-400">Total global estimado (EUR)</p></div><div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200"><div class="flex items-center justify-between mb-4"><h3 class="text-slate-500 text-sm font-semibold uppercase tracking-wider">MRs Pendientes</h3><div class="p-2 bg-orange-50 text-orange-600 rounded-lg"><i data-lucide="package-open" class="w-5 h-5"></i></div></div><p class="text-3xl font-bold text-slate-800">${stats.pendingMRs}</p></div></div><div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden fade-in"><div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center"><h3 class="font-bold text-slate-800">Estado Reciente de Proyectos (Activos)</h3><button onclick="window.changeView('projects')" class="text-sm text-tetrace-600 hover:underline">Ver todo</button></div><div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead class="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200"><tr><th class="px-6 py-3">Proyecto</th><th class="px-6 py-3">PM Asignado</th><th class="px-6 py-3">Estado</th><th class="px-6 py-3 text-right">Avance</th></tr></thead><tbody class="divide-y divide-slate-100">${activeSummaryProjects.map(p => `<tr class="hover:bg-slate-50 transition-colors cursor-pointer" onclick="window.loadProject('${p.id}')"><td class="px-6 py-4 font-medium text-slate-800">${p.name} <span class="text-xs text-slate-400 block">${p.code || 'S/C'}</span></td><td class="px-6 py-4 text-slate-600">${p.pmName || 'Sin asignar'}</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full text-xs font-semibold border ${BusinessLogic.getStatusColor(p.status)}">${p.status}</span></td><td class="px-6 py-4 text-right"><div class="flex items-center justify-end gap-2"><span class="text-xs font-bold">${p.progress}%</span><div class="w-20 h-2 bg-slate-200 rounded-full overflow-hidden"><div class="h-full bg-tetrace-500" style="width: ${p.progress}%"></div></div></div></td></tr>`).join('')}${activeSummaryProjects.length === 0 ? '<tr><td colspan="4" class="px-6 py-4 text-center text-slate-400">No hay proyectos activos recientes.</td></tr>' : ''}</tbody></table></div></div>`;
             },
             renderProjectsView() { /* ... Same ... */
                 const isArchivedView = window.currentProjectTab === 'archived';
@@ -548,39 +534,16 @@
                 this.container.innerHTML = `<div class="flex flex-col h-full fade-in"><div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm mb-6 flex flex-col md:flex-row items-center md:items-start gap-6 relative"><button onclick="window.changeView('personnel')" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-6 h-6"></i></button><div class="w-24 h-24 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-3xl font-bold border-4 border-white shadow-lg">${BusinessLogic.getInitials(person.name)}</div><div class="flex-1 text-center md:text-left"><h2 class="text-2xl font-bold text-slate-900">${person.name}</h2><p class="text-slate-500 font-medium">${person.position || person.role} ${person.specialty ? `• ${person.specialty}` : ''}</p><div class="flex flex-wrap gap-4 mt-4 justify-center md:justify-start">${!isPM ? `<div class="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200"><i data-lucide="credit-card" class="w-4 h-4 text-tetrace-500"></i><span>${person.docType || 'DOC'}: ${person.docNumber || '---'}</span></div>` : ''}<div class="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200"><i data-lucide="phone" class="w-4 h-4 text-tetrace-500"></i><span>${person.phone || 'Sin teléfono'}</span></div><div class="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200"><i data-lucide="mail" class="w-4 h-4 text-tetrace-500"></i><span>${person.email || 'Sin email'}</span></div></div></div></div><div class="border-b border-slate-200 mb-6"><nav class="-mb-px flex space-x-8">${tabs.map(tab => `<button onclick="window.setPersonDetailTab('${tab}')" class="${activeTab === tab ? 'border-tetrace-500 text-tetrace-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors">${tab}</button>`).join('')}</nav></div><div class="bg-white rounded-xl shadow-sm border border-slate-200 flex-1 p-6 overflow-y-auto relative">${this.renderPersonDetailTabContent(activeTab, person, isPM)}</div></div>`;
                 lucide.createIcons();
             },
-            renderPersonDetailTabContent(tabName, person, isPM) { /* ... Modified Historial Logic ... */
+            renderPersonDetailTabContent(tabName, person, isPM) { /* ... Same ... */
                 switch(tabName) {
                     case 'Perfil & EPP': case 'Perfil': return `<div class="grid grid-cols-1 ${isPM ? '' : 'md:grid-cols-2'} gap-8"><div><h3 class="text-lg font-bold text-slate-800 mb-4 border-b pb-2">Datos Personales</h3><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><label class="text-xs text-slate-500 font-bold uppercase">Nombres</label><p class="text-slate-800">${person.firstName || person.name.split(' ')[0]}</p></div><div><label class="text-xs text-slate-500 font-bold uppercase">Apellidos</label><p class="text-slate-800">${person.lastName || person.name.split(' ').slice(1).join(' ')}</p></div></div>${!isPM ? `<div class="grid grid-cols-2 gap-4"><div><label class="text-xs text-slate-500 font-bold uppercase">Documento</label><p class="text-slate-800">${person.docType || '---'}</p></div><div><label class="text-xs text-slate-500 font-bold uppercase">Número</label><p class="text-slate-800 font-mono">${person.docNumber || '---'}</p></div></div>` : ''}<div class="grid grid-cols-2 gap-4"><div><label class="text-xs text-slate-500 font-bold uppercase">Cargo</label><p class="text-slate-800">${person.position || person.role}</p></div><div><label class="text-xs text-slate-500 font-bold uppercase">Nacionalidad</label><p class="text-slate-800">${person.nationality || '---'}</p></div></div>${isPM ? `<div><label class="text-xs text-slate-500 font-bold uppercase">Oficina Base (Sede)</label><p class="text-slate-800">${person.office || '---'}</p></div>` : ''}</div><div class="flex gap-2 mt-6">${!isPM ? `<button onclick="window.openEditPersonModal('${person.id}')" class="flex-1 text-sm text-tetrace-600 hover:text-tetrace-800 font-medium border border-tetrace-200 rounded-lg py-2 hover:bg-tetrace-50 transition-colors"><i data-lucide="edit-3" class="w-4 h-4 inline mr-1"></i> Editar Datos</button>` : `<button onclick="window.openEditPMModal('${person.id}')" class="flex-1 text-sm text-tetrace-600 hover:text-tetrace-800 font-medium border border-tetrace-200 rounded-lg py-2 hover:bg-tetrace-50 transition-colors"><i data-lucide="edit-3" class="w-4 h-4 inline mr-1"></i> Editar Ejecutivo</button>`}<button onclick="window.requestDeletePerson('${person.id}')" class="px-3 py-2 text-red-500 hover:bg-red-50 border border-red-200 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div></div>${!isPM ? `<div><h3 class="text-lg font-bold text-slate-800 mb-4 border-b pb-2">Tallas EPP (Logística)</h3><div class="grid grid-cols-3 gap-4"><div class="bg-slate-50 p-4 rounded-lg text-center border border-slate-200"><i data-lucide="footprints" class="w-6 h-6 mx-auto mb-2 text-slate-400"></i><div class="text-xs text-slate-500 font-bold uppercase">Botas</div><div class="text-xl font-bold text-slate-900">${person.eppBoots || '-'}</div></div><div class="bg-slate-50 p-4 rounded-lg text-center border border-slate-200"><i data-lucide="shirt" class="w-6 h-6 mx-auto mb-2 text-slate-400"></i><div class="text-xs text-slate-500 font-bold uppercase">Camisa</div><div class="text-xl font-bold text-slate-900">${person.eppShirt || '-'}</div></div><div class="bg-slate-50 p-4 rounded-lg text-center border border-slate-200"><i data-lucide="scissors" class="w-6 h-6 mx-auto mb-2 text-slate-400"></i><div class="text-xs text-slate-500 font-bold uppercase">Pantalón</div><div class="text-xl font-bold text-slate-900">${person.eppPants || '-'}</div></div></div></div>` : ''}</div>`;
                     case 'Documentación': const docs = person.documents || []; return `<div class="space-y-6"><div class="flex justify-between items-center"><h3 class="font-bold text-slate-800">Carpeta Digital (${docs.length})</h3><button onclick="window.openAddDocumentModal('${person.id}')" class="flex items-center gap-2 bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs hover:bg-slate-900"><i data-lucide="plus" class="w-3 h-3"></i> Agregar Documento</button></div>${docs.length === 0 ? `<div class="text-center py-10 border-2 border-dashed border-slate-200 rounded-xl"><div class="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-3"><i data-lucide="file-x" class="w-6 h-6 text-slate-300"></i></div><p class="text-slate-500 text-sm">No hay documentos registrados.</p></div>` : `<div class="grid gap-3">${docs.map((doc, index) => { const status = BusinessLogic.getDocumentStatus(doc.expiry); return `<div class="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-lg shadow-sm hover:shadow-md transition-shadow"><div class="flex items-center gap-4"><div class="p-2 bg-slate-100 rounded text-slate-600"><i data-lucide="file-text" class="w-5 h-5"></i></div><div><div class="flex items-center gap-2"><p class="font-bold text-slate-800 text-sm">${doc.type}</p>${doc.detail ? `<span class="text-xs text-slate-400 bg-slate-50 px-1.5 rounded border border-slate-100">${doc.detail}</span>` : ''}</div><p class="text-xs text-slate-500">Vence: ${doc.expiry || 'N/A'}</p></div></div><div class="flex items-center gap-3"><span class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${status.color}">${status.label}</span><button onclick="window.deleteDocument('${person.id}', ${index})" class="text-red-300 hover:text-red-500 transition-colors p-1"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div></div>`; }).join('')}</div>`}</div>`;
-                    
-                    case 'Historial':
-                        // NUEVO: Usar getTechnicianHistory para mostrar historial completo
-                        const techHistory = BusinessLogic.getTechnicianHistory(person.id);
-                        return `
-                            <div class="space-y-4">
-                                <h3 class="font-bold text-slate-800 mb-4 border-b pb-2">Trayectoria de Proyectos (${techHistory.length})</h3>
-                                ${techHistory.length === 0 ? '<p class="text-slate-500 text-sm italic">Sin historial de proyectos registrado.</p>' : ''}
-                                <div class="grid gap-3">
-                                    ${techHistory.map(proj => `
-                                        <div class="p-4 border ${proj.status === 'Activo' ? 'border-blue-200 bg-blue-50' : 'border-slate-200 bg-white'} rounded-lg flex justify-between items-center transition-all hover:shadow-md cursor-pointer" onclick="window.loadProject('${proj.id}')">
-                                            <div>
-                                                <h4 class="font-bold ${proj.status === 'Activo' ? 'text-blue-900' : 'text-slate-700'}">${proj.name}</h4>
-                                                <p class="text-xs text-slate-500 font-mono mt-1">${proj.code || 'S/C'}</p>
-                                            </div>
-                                            <div class="text-right">
-                                                <span class="px-2 py-1 rounded text-[10px] font-bold uppercase border ${proj.status === 'Activo' ? 'bg-blue-100 text-blue-700 border-blue-300' : 'bg-slate-100 text-slate-600 border-slate-300'}">${proj.status}</span>
-                                            </div>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        `;
-                        
+                    case 'Historial': const assignedProject = Store.projects.find(p => p.id === person.currentProjectId); return `<div class="space-y-4"><h3 class="font-bold text-slate-800 mb-4">Asignación Actual</h3>${assignedProject ? `<div class="p-4 border border-blue-200 bg-blue-50 rounded-lg flex justify-between items-center"><div><h4 class="font-bold text-blue-900">${assignedProject.name}</h4><p class="text-xs text-blue-700">Código: ${assignedProject.code}</p></div><span class="px-2 py-1 bg-white text-blue-600 text-xs font-bold rounded shadow-sm">Activo</span></div>` : '<p class="text-slate-500 text-sm italic">Recurso disponible actualmente (Sin asignación activa).</p>'}<h3 class="font-bold text-slate-800 mt-8 mb-4 border-t pt-4">Historial de Proyectos</h3><p class="text-slate-400 text-sm">No hay registros históricos previos en el sistema.</p></div>`;
                     case 'Historial Completo': const pmProjects = Store.projects.filter(proj => proj.pmName === person.name); return `<div class="space-y-4"><h3 class="font-bold text-slate-800 mb-4">Portafolio de Gestión (${pmProjects.length})</h3>${pmProjects.length === 0 ? '<p class="text-slate-500 text-sm italic">Sin proyectos asignados en el sistema.</p>' : ''}<div class="grid gap-3">${pmProjects.map(proj => `<div class="p-4 border ${proj.status === 'Cerrado' ? 'border-slate-200 bg-slate-50' : 'border-blue-200 bg-white'} rounded-lg flex justify-between items-center hover:shadow-md transition-shadow cursor-pointer" onclick="window.loadProject('${proj.id}')"><div><h4 class="font-bold ${proj.status === 'Cerrado' ? 'text-slate-600' : 'text-slate-900'}">${proj.name}</h4><div class="flex gap-2 text-xs text-slate-500 mt-1"><span>${proj.code || 'S/C'}</span> • <span>${proj.country}</span></div></div><div class="text-right"><span class="px-2 py-1 rounded text-[10px] font-bold uppercase border ${BusinessLogic.getStatusColor(proj.status)}">${proj.status}</span><p class="text-[10px] text-slate-400 mt-1">${proj.startDate || ''}</p></div></div>`).join('')}</div></div>`;
                     default: return ``;
                 }
             },
-            renderProjectDetail(projectId) { /* ... Same ... */
+            renderProjectDetail(projectId) {
                 try {
                     const project = Store.projects.find(p => p.id === projectId);
                     if (!project) {
@@ -649,7 +612,7 @@
                     this.container.innerHTML = `<div class="p-8 text-center text-red-500">Error al cargar el proyecto. <button onclick="window.changeView('projects')" class="underline">Volver</button></div>`;
                 }
             },
-            renderDetailTabContent(tabName, project) { /* ... Same ... */
+            renderDetailTabContent(tabName, project) {
                 if (tabName === 'Asistencia') {
                     const selectedDate = Store.ui.selectedAttendanceDate;
                     if (selectedDate) {
@@ -658,12 +621,92 @@
                         return this.renderAttendanceCalendar(project, false);
                     }
                 }
-                if(tabName === 'Técnicos') {
+                if (tabName === 'Técnicos') {
                     const assignedTechs = BusinessLogic.getAssignedTechs(project.id);
                     const availableTechs = BusinessLogic.getAvailableTechs();
                     return `<div class="space-y-6"><div class="flex justify-between items-center"><h3 class="font-bold text-slate-800">Equipo Asignado (${assignedTechs.length})</h3></div><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${assignedTechs.map(tech => `<div class="p-4 border border-slate-200 rounded-lg flex items-center justify-between"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold">${BusinessLogic.getInitials(tech.name)}</div><div><p class="font-medium text-sm text-slate-900">${tech.name}</p><p class="text-xs text-slate-500">${tech.position || tech.specialty || 'Técnico'}</p></div></div><button onclick="window.assignTech('${tech.id}', null)" class="text-red-400 hover:text-red-600 p-1"><i data-lucide="minus-circle" class="w-4 h-4"></i></button></div>`).join('')}${assignedTechs.length === 0 ? '<p class="text-sm text-slate-400 col-span-full">No hay técnicos asignados.</p>' : ''}</div><div class="border-t border-slate-100 pt-6"><h3 class="font-bold text-slate-800 mb-4">Añadir Técnico Disponible</h3>${availableTechs.length > 0 ? `<div class="flex gap-2"><select id="techSelect" class="bg-slate-50 border border-slate-300 text-slate-800 text-sm rounded-lg p-2.5 w-full max-w-xs">${availableTechs.map(t => `<option value="${t.id}">${t.name} - ${t.position || t.specialty}</option>`).join('')}</select><button onclick="window.assignTech(document.getElementById('techSelect').value, '${project.id}')" class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-900">Asignar</button></div>` : '<p class="text-sm text-orange-500">No hay técnicos disponibles en la base de datos.</p>'}</div></div>`;
                 }
+                if (tabName === 'Materiales') {
+                    return this.renderMaterialsTab(project);
+                }
                 return `<div class="text-center py-10 text-slate-400">Contenido de ${tabName} en desarrollo.</div>`;
+            },
+            
+            renderMaterialsTab(project) {
+                const materials = Store.materials.filter(m => m.projectId === project.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                const groupedMaterials = BusinessLogic.groupMaterialsByDate(materials);
+                const dates = Object.keys(groupedMaterials);
+
+                return `
+                    <div class="flex flex-col h-full gap-6">
+                        <div class="flex justify-between items-center">
+                            <h3 class="font-bold text-slate-800">Solicitudes de Material (MR)</h3>
+                            <button onclick="window.openNewMaterialModal('${project.id}')" class="flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-all active:scale-95">
+                                <i data-lucide="plus" class="w-4 h-4"></i> Crear Solicitud
+                            </button>
+                        </div>
+                        ${dates.length === 0 ? `<div class="flex-1 flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-xl"><i data-lucide="box" class="w-12 h-12 mb-4 opacity-50"></i><p>No hay solicitudes de material registradas.</p></div>` : `<div class="space-y-8">${dates.map(date => this.renderMaterialGroup(date, groupedMaterials[date])).join('')}</div>`}
+                    </div>
+                `;
+            },
+
+            // --- REFACTOR: TABLE VIEW FOR MATERIALS (v1.23.1) ---
+            renderMaterialGroup(date, items) {
+                return `
+                    <div class="mb-8">
+                        <div class="flex items-center gap-4 mb-3">
+                            <div class="p-1 bg-slate-100 rounded-lg border border-slate-200"><i data-lucide="calendar" class="w-4 h-4 text-slate-500"></i></div>
+                            <h4 class="text-sm font-bold text-slate-700 uppercase tracking-wider">${date}</h4>
+                            <div class="h-px bg-slate-200 flex-1"></div>
+                        </div>
+                        <div class="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
+                            <table class="w-full text-sm text-left">
+                                <thead class="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 text-xs uppercase">
+                                    <tr>
+                                        <th class="px-4 py-3 w-32">Categoría</th>
+                                        <th class="px-4 py-3 w-24">Código</th> <!-- Separate Code Column -->
+                                        <th class="px-4 py-3">Descripción</th> <!-- Separate Desc Column -->
+                                        <th class="px-4 py-3 w-24 text-center">Cant.</th>
+                                        <th class="px-4 py-3 w-24 text-center">Urgencia</th>
+                                        <th class="px-4 py-3 w-32">N° Pedido</th>
+                                        <th class="px-4 py-3 w-32">Estado</th>
+                                        <th class="px-4 py-3 w-10"></th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    ${items.map(item => {
+                                        const urgencyColor = item.urgency === 'Alta' ? 'bg-red-100 text-red-700' : item.urgency === 'Media' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700';
+                                        const statusOptions = BusinessLogic.constants.materialStatuses.map(s => `<option value="${s}" ${s === item.status ? 'selected' : ''}>${s}</option>`).join('');
+                                        return `
+                                            <tr class="hover:bg-slate-50 transition-colors group">
+                                                <td class="px-4 py-3 text-xs font-medium text-slate-600">${item.category}</td>
+                                                <td class="px-4 py-3 text-xs font-mono text-slate-500 font-bold">${item.code || '-'}</td> <!-- Code Cell -->
+                                                <td class="px-4 py-3 font-bold text-slate-800 text-sm">${item.description}</td> <!-- Desc Cell -->
+                                                <td class="px-4 py-3 text-center">
+                                                    <span class="font-mono font-bold text-slate-700">${item.quantity}</span> <span class="text-xs text-slate-400">${item.unit}</span>
+                                                </td>
+                                                <td class="px-4 py-3 text-center">
+                                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${urgencyColor}">${item.urgency}</span>
+                                                </td>
+                                                <td class="px-4 py-3">
+                                                    <input type="text" value="${item.orderNumber || ''}" onchange="window.updateMaterialOrderNum('${item.id}', this.value)" class="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs focus:bg-white focus:border-tetrace-500 outline-none transition-colors" placeholder="-">
+                                                </td>
+                                                <td class="px-4 py-3">
+                                                    <select onchange="window.updateMaterialStatus('${item.id}', this.value)" class="w-full bg-white border border-slate-200 rounded px-1 py-1 text-xs focus:border-tetrace-500 outline-none font-medium text-slate-700 cursor-pointer hover:bg-slate-50">
+                                                        ${statusOptions}
+                                                    </select>
+                                                </td>
+                                                <td class="px-4 py-3 text-right">
+                                                    <button onclick="window.deleteMaterial('${item.id}')" class="text-slate-300 hover:text-red-500 transition-colors p-1 rounded-md hover:bg-red-50"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                                </td>
+                                            </tr>
+                                        `;
+                                    }).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
             },
             
             // --- CALENDARIO ---
@@ -789,8 +832,8 @@
                                                 </td>
                                             </tr>
                                             <tr class="${rowClass} transition-colors">
-                                                <td class="p-1" colspan="2"><input type="text" id="wtg_${item.id}" value="${r.wtg || ''}" placeholder="WTG" class="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-tetrace-500 outline-none"></td>
-                                                <td colspan="2" class="p-1"><input type="text" id="comment_${item.id}" value="${r.comment || ''}" placeholder="Comentarios / Incidencias..." class="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-tetrace-500 outline-none"></td>
+                                                <td class="p-1"><input type="text" id="wtg_${item.id}" value="${r.wtg || ''}" placeholder="WTG" class="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-tetrace-500 outline-none"></td>
+                                                <td colspan="3" class="p-1"><input type="text" id="comment_${item.id}" value="${r.comment || ''}" placeholder="Comentarios / Incidencias..." class="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-tetrace-500 outline-none"></td>
                                             </tr>
                                         `;
                                     }).join('')}
@@ -931,6 +974,64 @@
             });
             
             DBService.saveAttendance(projectId, date, records);
+        };
+
+        // --- NEW: MATERIALS CONTROLLERS (v1.21.0) ---
+        window.openNewMaterialModal = (projectId) => {
+            const { materialCategories, materialUrgencies, materialUnits } = BusinessLogic.constants;
+            UIService.toggleModal(true, `
+                <div class="p-6 bg-white border-b border-slate-200 flex justify-between items-center"><h3 class="text-lg font-bold text-slate-800">Nueva Solicitud de Material</h3><button onclick="window.closeModal()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x"></i></button></div>
+                <div class="p-6 bg-slate-50 space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Categoría</label><select id="mat_cat" class="w-full border rounded p-2 text-sm bg-white">${materialCategories.map(c=>`<option>${c}</option>`).join('')}</select></div>
+                        <div><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Urgencia</label><select id="mat_urg" class="w-full border rounded p-2 text-sm bg-white">${materialUrgencies.map(u=>`<option>${u}</option>`).join('')}</select></div>
+                    </div>
+                    <div><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Descripción</label><input type="text" id="mat_desc" class="w-full border rounded p-2 text-sm" placeholder="Ej. Cable 12AWG"></div>
+                    <div class="grid grid-cols-3 gap-4">
+                        <div class="col-span-1"><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Código</label><input type="text" id="mat_code" class="w-full border rounded p-2 text-sm"></div>
+                        <div class="col-span-1"><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Cant.</label><input type="number" id="mat_qty" class="w-full border rounded p-2 text-sm"></div>
+                        <div class="col-span-1"><label class="block text-xs font-bold text-slate-500 uppercase mb-1">Unidad</label><select id="mat_unit" class="w-full border rounded p-2 text-sm bg-white">${materialUnits.map(u=>`<option>${u}</option>`).join('')}</select></div>
+                    </div>
+                    <div class="pt-4 flex justify-end gap-2">
+                         <button onclick="window.closeModal()" class="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded">Cancelar</button>
+                         <button onclick="window.submitNewMaterial('${projectId}')" class="px-4 py-2 bg-tetrace-600 text-white font-bold rounded shadow-lg hover:bg-tetrace-700">Guardar Solicitud</button>
+                    </div>
+                </div>
+            `);
+            lucide.createIcons();
+        };
+
+        window.submitNewMaterial = (projectId) => {
+            const data = {
+                projectId,
+                category: document.getElementById('mat_cat').value,
+                urgency: document.getElementById('mat_urg').value,
+                description: document.getElementById('mat_desc').value,
+                code: document.getElementById('mat_code').value,
+                quantity: document.getElementById('mat_qty').value,
+                unit: document.getElementById('mat_unit').value,
+                status: 'Borrador',
+                orderNumber: ''
+            };
+            if(!data.description || !data.quantity) return alert("Descripción y Cantidad requeridos");
+            DBService.addMaterial(data);
+            window.closeModal();
+            if(Store.ui.currentView === 'project-detail') UIService.renderProjectDetail(projectId);
+        };
+
+        window.updateMaterialStatus = (id, newStatus) => {
+            DBService.updateMaterial(id, { status: newStatus });
+        };
+        
+        window.updateMaterialOrderNum = (id, newOrderNum) => {
+            DBService.updateMaterial(id, { orderNumber: newOrderNum });
+        };
+        
+        window.deleteMaterial = (id) => {
+             // Immediate delete without confirm
+             DBService.deleteMaterial(id);
+             // Re-render handled by store update implicitly, but forcing refresh for immediate feel
+             if(Store.ui.currentView === 'project-detail') UIService.renderProjectDetail(Store.ui.selectedProjectId);
         };
 
         // --- HANDLERS GENÉRICOS ---
