@@ -92,7 +92,7 @@
             <ul class="space-y-1 px-3" id="nav-links"></ul>
         </nav>
 
-        <div class="p-4 border-t border-slate-800 text-xs text-slate-500 text-center sidebar-text whitespace-nowrap">v1.24.0 • Ingenium</div>
+        <div class="p-4 border-t border-slate-800 text-xs text-slate-500 text-center sidebar-text whitespace-nowrap">v1.25.0 • Ingenium</div>
     </aside>
 
     <!-- MAIN AREA -->
@@ -141,17 +141,20 @@
         import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        const firebaseConfig = {
-            apiKey: "AIzaSyCxjdMrl_cO0uPCCmqU308wEtutRibE7cg",
-            authDomain: "tetrace-hub.firebaseapp.com",
-            projectId: "tetrace-hub",
-            storageBucket: "tetrace-hub.firebasestorage.app",
-            messagingSenderId: "562552668710",
-            appId: "1:562552668710:web:fdcdb0a8eb3e2a56ffdce7",
-            measurementId: "G-RN73SL3FJD"
-        };
+        // CONFIGURACIÓN DINÁMICA DE FIREBASE (CRITICO PARA CONEXIÓN)
+        let firebaseConfig;
+        if (typeof __firebase_config !== 'undefined') {
+            firebaseConfig = JSON.parse(__firebase_config);
+            console.log("✅ Usando configuración dinámica del entorno.");
+        } else {
+            console.warn("⚠️ Usando configuración fallback (puede fallar la conexión).");
+             firebaseConfig = {
+                apiKey: "AIzaSyCxjdMrl_cO0uPCCmqU308wEtutRibE7cg", // Fallback
+                authDomain: "tetrace-hub.firebaseapp.com",
+                projectId: "tetrace-hub"
+            };
+        }
 
-        // FIXED: USE ENVIRONMENT APP_ID FOR CORRECT CLOUD SHARDING
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'tetrace-dev-fallback';
         console.log("🚀 Initializing TETRACE ERP on Instance:", APP_ID);
 
@@ -178,8 +181,7 @@
             setAttendance(data) { this.attendance = data; this.notify(); },
             setMaterials(data) { this.materials = data; this.notify(); },
             
-            // NUEVO: Gestión de Estado de Sincronización
-            setSyncStatus(status) { // 'synced', 'syncing', 'error'
+            setSyncStatus(status) { 
                 const el = document.getElementById('sync-status');
                 if(!el) return;
                 
@@ -224,18 +226,26 @@
                 }, 5000); 
 
                 try {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
-                    else await signInAnonymously(auth);
+                    // AUTENTICACIÓN ROBUSTA CON TOKEN DEL SISTEMA
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        console.log("🔐 Autenticando con token seguro...");
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        console.warn("⚠️ Token no encontrado. Intentando anónimo...");
+                        await signInAnonymously(auth);
+                    }
                     
                     onAuthStateChanged(auth, (user) => {
                         clearTimeout(watchdog);
                         if (user) { 
                             Store.user = user; 
                             Store.setSyncStatus('synced');
+                            console.log("✅ Conectado como:", user.uid);
                             DBService.startListeners(user.uid); 
                         } else { 
                             Store.setLoading(false); 
                             Store.setSyncStatus('error');
+                            console.error("❌ Fallo de autenticación.");
                         }
                     });
                 } catch (error) { 
@@ -247,7 +257,7 @@
             },
 
             startListeners: (userId) => {
-                // FIXED: Use variable APP_ID
+                // USA PATHS DINÁMICOS BASADOS EN APP_ID
                 const projectsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'projects');
                 const personnelRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'personnel');
                 const logsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'logs');
@@ -281,7 +291,6 @@
             seedMockData: async () => {
                 localStorage.setItem('tetrace_seeded', 'true');
                 
-                // Solo Personal Mock
                 const pm = {
                     firstName: "Steven", lastName: "Ko", name: "Steven Ko", role: "Project Manager", position: "Project Manager", email: "steven.ko@tetrace.com", phone: "+51 999 888 777", nationality: "Peruana", office: "Perú", currentProjectId: null, id: "pm_mock_01"
                 };
@@ -313,15 +322,12 @@
                 
                 const updatedList = [...currentList, optimisticData];
                 
-                // 1. Update UI
                 setter(updatedList); 
                 if(cacheKey) localStorage.setItem(cacheKey, JSON.stringify(updatedList));
                 
-                // 2. Set Sync Status
                 Store.setSyncStatus('syncing');
                 UIService.toast("Guardando...", "info");
 
-                // 3. Network Write
                 if (auth.currentUser) {
                     try {
                         await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', collName), { ...data, createdAt: serverTimestamp() });
@@ -379,7 +385,7 @@
                 }
             },
 
-            // --- SPECIFIC METHODS WRAPPING GENERIC ---
+            // --- SPECIFIC METHODS ---
             addProject: async (data) => DBService.genericAdd('projects', data, (d) => Store.setProjects(d), 'tetrace_projects'),
             updateProject: async (id, data) => DBService.genericUpdate('projects', id, data, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
             deleteProject: async (id) => DBService.genericDelete('projects', id, Store.projects, (d) => Store.setProjects(d), 'tetrace_projects'),
@@ -396,7 +402,6 @@
                 const docId = `${projectId}_${date}`;
                 const attendanceData = { id: docId, projectId, date, records };
                 
-                // Optimistic
                 const existingIndex = Store.attendance.findIndex(a => a.id === docId);
                 let updatedAttendance = [...Store.attendance];
                 if (existingIndex >= 0) updatedAttendance[existingIndex] = attendanceData;
@@ -465,6 +470,11 @@
                 const collapsedPref = localStorage.getItem('tetrace_sidebar_collapsed');
                 if (collapsedPref === 'true') Store.ui.isSidebarCollapsed = true;
                 
+                // MOCK DATA CHECK IMMEDIATELY
+                if (!localStorage.getItem('tetrace_seeded')) {
+                    DBService.seedMockData(); // Force seed before load
+                }
+
                 ['tetrace_projects', 'tetrace_personnel', 'tetrace_attendance', 'tetrace_materials'].forEach(key => {
                     const data = localStorage.getItem(key);
                     if (data) { try { const parsed = JSON.parse(data); 
